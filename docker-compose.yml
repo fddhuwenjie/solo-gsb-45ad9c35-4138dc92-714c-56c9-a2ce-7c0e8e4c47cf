@@ -1,0 +1,13 @@
+services:
+  palette-bench:
+    build: .
+    image: accessible-palette-bench:latest
+    container_name: accessible-palette-bench
+    ports:
+      - "8000:8000"
+    volumes:
+      - palette-data:/data
+    restart: unless-stopped
+
+volumes:
+  palette-data:

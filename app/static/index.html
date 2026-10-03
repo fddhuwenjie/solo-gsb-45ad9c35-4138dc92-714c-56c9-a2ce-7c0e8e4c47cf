@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多约束无障碍调色台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">🎛️</span>
+      <div>
+        <h1>多约束无障碍调色台</h1>
+        <p class="subtitle">只调 HSL 明度 · 满足全部 WCAG 对比度 · 总改变量最小</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="btn-save-config" class="btn btn-ghost" title="把当前角色与关系保存到后端">保存配置</button>
+      <button id="btn-solve" class="btn btn-primary">求解调色</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左列：角色与关系 -->
+    <section class="col col-input">
+      <div class="card">
+        <div class="card-head">
+          <h2>语义角色</h2>
+          <button id="btn-add-role" class="btn btn-small">＋ 新增角色</button>
+        </div>
+        <p class="hint">锁定角色的明度不会被调整。色相与饱和度在求解时始终保持不变。</p>
+        <div id="roles-list" class="roles-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>前景—背景关系</h2>
+          <button id="btn-add-relation" class="btn btn-small">＋ 新增关系</button>
+        </div>
+        <p class="hint">
+          常见门槛：AA 正文 <strong>4.5:1</strong>、AA 大字号/UI 3:1、
+          AAA 正文 <strong>7:1</strong>。
+        </p>
+        <div id="relations-list" class="relations-list"></div>
+      </div>
+    </section>
+
+    <!-- 中列：结果与样张 -->
+    <section class="col col-result">
+      <div id="status-banner" class="banner hidden"></div>
+
+      <div class="card" id="result-card" hidden>
+        <div class="card-head">
+          <h2>求解结果</h2>
+          <div class="result-meta" id="result-meta"></div>
+        </div>
+        <div id="per-role-table" class="per-role-table"></div>
+        <div class="rel-results" id="rel-results"></div>
+      </div>
+
+      <div class="card preview-card" id="preview-card" hidden>
+        <div class="card-head"><h2>样张预览</h2></div>
+        <div id="preview-area" class="preview-area"></div>
+      </div>
+
+      <div class="card conflict-card" id="conflict-card" hidden>
+        <div class="card-head">
+          <h2>无解：冲突约束</h2>
+        </div>
+        <div id="conflict-area"></div>
+      </div>
+    </section>
+
+    <!-- 右列：版本与导出 -->
+    <aside class="col col-side">
+      <div class="card">
+        <div class="card-head"><h2>版本</h2></div>
+        <div class="version-save-row">
+          <input id="version-label" type="text" maxlength="40" placeholder="版本说明（可选）" />
+          <button id="btn-save-version" class="btn btn-small btn-primary" disabled>存为版本</button>
+        </div>
+        <ul id="versions-list" class="versions-list"></ul>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>导出 CSS 变量</h2></div>
+        <p class="hint">基于最近一次可行求解结果。</p>
+        <button id="btn-export" class="btn btn-block" disabled>生成并下载 variables.css</button>
+        <pre id="export-preview" class="export-preview" hidden></pre>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
