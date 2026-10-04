@@ -67,6 +67,90 @@ def _validate_payload(payload: dict) -> tuple[list[dict], list[dict]]:
     return roles, relations
 
 
+# ---------------------------------------------------------------- 结果绑定校验
+
+class ResultStaleError(Exception):
+    """客户端带来的 result 与其 payload 不配对（被篡改、无解或未完成）。
+
+    与 ValueError（入参格式错误，400）区分：这类请求的配置本身合法，
+    只是结果已过期，返回 409 要求前端重新求解。
+    """
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+def _resolve_bound_result(payload, result):
+    """校验 result 与 payload 配对，返回 (规范化 payload, 权威 result)。
+
+    版本保存与 CSS 导出都必须经过这里：服务端从不信任客户端带来的
+    result，而是按 payload 重新求解，再核对客户端结果与权威结果一致。
+    任何不一致（编辑后未重解）、无解或未完成（预算耗尽）的结果都被拒绝。
+    返回的 payload 经过规范化（HEX 小写化、名称去空白、bool 锁定等），
+    保证 SQLite 快照、预览与 CSS 始终来自同一份配置。
+    """
+    try:
+        roles, relations = _validate_payload(payload or {})
+    except ValueError:
+        raise ResultStaleError("配置已变化，请重新求解后再保存或导出", 400)
+
+    canonical = solver.solve(roles, relations)
+    if canonical["status"] != "optimal":
+        if canonical["status"] == "exhausted":
+            raise ResultStaleError("求解尚未完成（搜索预算耗尽），请调整后重新求解", 409)
+        raise ResultStaleError("当前配置无可行解，请调整后重新求解", 409)
+
+    if not isinstance(result, dict) or result.get("status") != "optimal":
+        raise ResultStaleError("请先完成一次可行求解后再保存或导出", 400)
+
+    mismatch = _result_mismatch(result, canonical)
+    if mismatch:
+        raise ResultStaleError(
+            f"求解结果与当前配置不一致（{mismatch}），请重新求解后再保存或导出", 409)
+
+    canonical_payload = {
+        "roles": roles,
+        "relations": [
+            {"fg": rel["fg"], "bg": rel["bg"], "min_contrast": rel["min_contrast"]}
+            for rel in relations
+        ],
+    }
+    return canonical_payload, canonical
+
+
+def _result_mismatch(result: dict, canonical: dict) -> str | None:
+    """结构比对客户端 result 与服务端重算结果；不一致时返回原因。"""
+    if result.get("total_delta") != canonical["total_delta"]:
+        return "总明度改变量不同"
+
+    cli_roles = result.get("per_role")
+    if not isinstance(cli_roles, list) or len(cli_roles) != len(canonical["per_role"]):
+        return "角色集合不同"
+    for got, want in zip(cli_roles, canonical["per_role"]):
+        if not isinstance(got, dict) or got.get("name") != want["name"]:
+            return "角色集合不同"
+        for key in ("l_after", "delta", "new_hex", "old_hex", "locked"):
+            if got.get(key) != want[key]:
+                return f"角色「{want['name']}」的结果已过期"
+
+    cli_rels = result.get("per_relation")
+    if not isinstance(cli_rels, list) or len(cli_rels) != len(canonical["per_relation"]):
+        return "关系集合不同"
+    for got, want in zip(cli_rels, canonical["per_relation"]):
+        if not isinstance(got, dict):
+            return "关系集合不同"
+        if (got.get("fg") != want["fg"] or got.get("bg") != want["bg"]
+                or got.get("min_contrast") != want["min_contrast"]):
+            return "前景—背景关系已变化"
+        try:
+            if abs(float(got.get("after")) - float(want["after"])) > 1e-6:
+                return f"关系「{want['fg']} on {want['bg']}」的对比度已过期"
+        except (TypeError, ValueError):
+            return f"关系「{want['fg']} on {want['bg']}」的对比度格式有误"
+    return None
+
+
 def _error(message: str, status: int = 400):
     return jsonify({"error": message}), status
 
@@ -117,10 +201,11 @@ def api_create_version():
     result = body.get("result")
     label = str(body.get("label", "")).strip() or "未命名版本"
     try:
-        _validate_payload(payload or {})
-    except ValueError as exc:
-        return _error(str(exc))
-    return jsonify(storage.create_version(label, payload, result)), 201
+        # 重算并绑定校验：快照里的 result 必须由同一份 payload 推出
+        canonical_payload, canonical = _resolve_bound_result(payload, result)
+    except ResultStaleError as exc:
+        return _error(str(exc), exc.status)
+    return jsonify(storage.create_version(label, canonical_payload, canonical)), 201
 
 
 @app.get("/api/versions/<vid>")
@@ -155,14 +240,8 @@ def _css_var_name(name: str, used: set[str], fallback_index: int) -> str:
     return candidate
 
 
-@app.post("/api/export")
-def api_export():
-    """根据求解结果导出 CSS 变量（text/css）。"""
-    body = request.get_json(force=True) or {}
-    result = body.get("result")
-    if not isinstance(result, dict) or result.get("status") != "optimal":
-        return _error("请先完成一次可行求解后再导出", 400)
-
+def _render_css(result: dict) -> str:
+    """由服务端重算确认过的求解结果生成 CSS 变量文本。"""
     per_role = result.get("per_role", [])
     used: set[str] = set()
     var_names = {r["name"]: _css_var_name(r["name"], used, i + 1)
@@ -191,7 +270,19 @@ def api_export():
                 f"{rel['after']:.2f}:1 (要求 ≥ {rel['min_contrast']:g}:1) */"
             )
 
-    css = "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n"
+
+
+@app.post("/api/export")
+def api_export():
+    """根据与 payload 绑定校验的求解结果导出 CSS 变量（text/css）。"""
+    body = request.get_json(force=True) or {}
+    try:
+        _canonical_payload, canonical = _resolve_bound_result(body.get("payload"), body.get("result"))
+    except ResultStaleError as exc:
+        return _error(str(exc), exc.status)
+
+    css = _render_css(canonical)
     return css, 200, {"Content-Type": "text/css; charset=utf-8"}
 
 

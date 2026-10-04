@@ -6,4 +6,5 @@ data/
 *.db-shm
 .venv/
 venv/
+node_modules/
 .DS_Store
