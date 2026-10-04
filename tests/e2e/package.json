@@ -1,0 +1,13 @@
+{
+  "name": "palette-workbench-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "调色台端到端回归测试（jsdom + 真实 Flask 服务）",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

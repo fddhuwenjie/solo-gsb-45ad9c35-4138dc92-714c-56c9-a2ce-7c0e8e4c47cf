@@ -138,6 +138,7 @@ function renderRoles() {
     picker.title = "选择颜色";
     picker.addEventListener("input", () => {
       role.hex = picker.value.toLowerCase();
+      invalidateResult();
       renderRoles();
     });
     colorWrap.appendChild(picker);
@@ -160,6 +161,7 @@ function renderRoles() {
           if (rel.fg === oldName) rel.fg = role.name;
           if (rel.bg === oldName) rel.bg = role.name;
         }
+        invalidateResult();
         renderRelations();
       }
     });
@@ -180,6 +182,7 @@ function renderRoles() {
     cb.title = "锁定后该角色明度不参与求解";
     cb.addEventListener("change", () => {
       role.locked = cb.checked;
+      invalidateResult();
       renderRoles();
     });
     lock.append(cb, document.createTextNode(role.locked ? "🔒 锁定" : "锁定"));
@@ -190,6 +193,7 @@ function renderRoles() {
     del.title = "删除角色（相关关系会一并移除）";
     del.addEventListener("click", () => {
       const name = role.name;
+      invalidateResult();
       state.roles.splice(i, 1);
       state.relations = state.relations.filter((r) => r.fg !== name && r.bg !== name);
       renderAll();
@@ -223,7 +227,7 @@ function renderRelations() {
 
     const fg = document.createElement("select");
     fg.innerHTML = roleOptions(rel.fg);
-    fg.addEventListener("change", () => { rel.fg = fg.value; });
+    fg.addEventListener("change", () => { rel.fg = fg.value; invalidateResult(); });
 
     const arrow = document.createElement("div");
     arrow.className = "rel-arrow";
@@ -231,7 +235,7 @@ function renderRelations() {
 
     const bg = document.createElement("select");
     bg.innerHTML = roleOptions(rel.bg);
-    bg.addEventListener("change", () => { rel.bg = bg.value; });
+    bg.addEventListener("change", () => { rel.bg = bg.value; invalidateResult(); });
 
     const minWrap = document.createElement("div");
     minWrap.className = "rel-min";
@@ -239,7 +243,10 @@ function renderRelations() {
     num.type = "number";
     num.min = "1"; num.max = "21"; num.step = "0.1";
     num.value = rel.min_contrast;
-    num.addEventListener("input", () => { rel.min_contrast = parseFloat(num.value) || 0; });
+    num.addEventListener("input", () => {
+      rel.min_contrast = parseFloat(num.value) || 0;
+      invalidateResult();
+    });
     minWrap.append(num, document.createElement("span"));
     minWrap.lastChild.textContent = ":1";
 
@@ -248,6 +255,7 @@ function renderRelations() {
     del.textContent = "✕";
     del.title = "删除关系";
     del.addEventListener("click", () => {
+      invalidateResult();
       state.relations.splice(i, 1);
       renderRelations();
     });
@@ -318,6 +326,8 @@ async function runSolve(showSuccess = true) {
       showBanner("warn", "搜索空间过大，预算耗尽未完成求解。可减少角色数或锁定更多角色。");
       clearResult();
       hideConflicts();
+      $("btn-save-version").disabled = true;
+      $("btn-export").disabled = true;
     }
   } catch (err) {
     showBanner("error", "网络错误：" + err.message);
@@ -352,6 +362,22 @@ function clearResult() {
 function hideConflicts() {
   $("conflict-card").hidden = true;
   $("conflict-area").innerHTML = "";
+}
+
+// 配置一旦在求解之后被改动，旧结果立即作废：清除结果/样张/冲突高亮，
+// 禁用「存为版本」与 CSS 导出，直到针对当前配置重新求解。
+function invalidateResult() {
+  if (!lastResult) return;
+  lastResult = null;
+  clearResult();
+  hideConflicts();
+  $("btn-save-version").disabled = true;
+  $("btn-export").disabled = true;
+  renderRelations();
+  const banner = $("status-banner");
+  if (!banner.classList.contains("hidden")) {
+    banner.className = "banner hidden";
+  }
 }
 
 // ------------------------------------------------------------ 渲染：结果表
@@ -559,24 +585,83 @@ async function loadVersions() {
   }
 }
 
-async function restoreVersion(vid) {
+// 校验恢复出来的 result 与 payload 是否成对：角色集合、名称、起始色、锁定
+// 状态、新明度，以及关系（按序号对齐的 fg/bg/门槛/对比度）都必须一致。
+// 任何一项对不上（旧版本或被改动的快照）都只恢复配置，结果作废并提示重新求解。
+// 注意 result.per_role 按角色名排序、长度顺序与 payload 不一定相同，必须按名映射。
+function resultMatchesState(payload, result) {
+  if (!result || result.status !== "optimal") return false;
+  if (!Array.isArray(payload.roles) || !Array.isArray(payload.relations)) return false;
+  if (!Array.isArray(result.per_role) || result.per_role.length !== payload.roles.length) {
+    return false;
+  }
+  const light = result.lightness;
+  const newHex = result.new_hex;
+  if (!light || typeof light !== "object" || !newHex || typeof newHex !== "object") {
+    return false;
+  }
+  const perRoleByName = new Map(result.per_role.map((r) => [r.name, r]));
+  for (const role of payload.roles) {
+    const pr = perRoleByName.get(role.name);
+    if (!pr) return false;
+    let normHex;
+    try { normHex = normalizeHex(role.hex); } catch { return false; }
+    if (pr.old_hex !== normHex) return false;
+    if (!!pr.locked !== !!role.locked) return false;
+    if (light[role.name] !== pr.l_after) return false;
+    if (!newHex[role.name] || newHex[role.name] !== pr.new_hex) return false;
+  }
+  const perRel = result.per_relation;
+  if (!Array.isArray(perRel) || perRel.length !== payload.relations.length) return false;
+  for (let i = 0; i < payload.relations.length; i++) {
+    const rel = payload.relations[i];
+    const rr = perRel[i];
+    if (!rr || rr.fg !== rel.fg || rr.bg !== rel.bg) return false;
+    if (Math.abs(Number(rr.min_contrast) - Number(rel.min_contrast)) > 1e-9) return false;
+    if (!(Number(rr.after) + 1e-9 >= Number(rel.min_contrast))) return false;
+  }
+  return true;
+}
+
+// 恢复请求串行化：行标签与恢复按钮都会触发恢复，且用户可能连续点击不同
+// 版本；并发返回时旧响应可能覆盖新配置，因此同一时刻只允许一个恢复请求。
+let restoreChain = Promise.resolve();
+
+function restoreVersion(vid) {
+  const run = restoreChain.then(() => doRestoreVersion(vid));
+  // 链不因某次失败中断
+  restoreChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function doRestoreVersion(vid) {
   const res = await fetch(`/api/versions/${vid}`);
   if (!res.ok) return toast("版本不存在", "error");
   const v = await res.json();
   state = v.payload;
-  lastResult = v.result;
   renderAll();
-  if (lastResult?.status === "optimal") {
+  if (resultMatchesState(v.payload, v.result)) {
+    // 配置与结果成对生效
+    lastResult = v.result;
     renderResult(lastResult);
     renderPreview(lastResult);
+    hideConflicts();
     $("btn-save-version").disabled = false;
     $("btn-export").disabled = false;
     showBanner("success", `已恢复版本「${v.label}」的配置与结果。`);
   } else {
+    lastResult = null;
     clearResult();
     hideConflicts();
-    showBanner("success", `已恢复版本「${v.label}」的配置，请重新求解。`);
+    $("btn-save-version").disabled = true;
+    $("btn-export").disabled = true;
+    showBanner("warn",
+      v.result
+        ? `版本「${v.label}」的配置与结果不匹配，已恢复配置，请重新求解。`
+        : `已恢复版本「${v.label}」的配置，请重新求解。`);
   }
+  // 恢复完成标记，供测试/自动化等待这一异步动作真正落定
+  document.body.dataset.restoredVersionId = vid;
   toast(`已恢复「${v.label}」`, "success");
 }
 
@@ -595,7 +680,7 @@ async function exportCss() {
   const res = await fetch("/api/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ result: lastResult }),
+    body: JSON.stringify({ payload: state, result: lastResult }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -625,11 +710,13 @@ function renderAll() {
 
 function bindEvents() {
   $("btn-add-role").addEventListener("click", () => {
+    invalidateResult();
     state.roles.push({ name: `role-${state.roles.length + 1}`, hex: "#888888", locked: false });
     renderRoles();
   });
   $("btn-add-relation").addEventListener("click", () => {
     if (state.roles.length < 2) return toast("请先创建至少两个角色", "error");
+    invalidateResult();
     state.relations.push({
       fg: state.roles[0].name,
       bg: state.roles[1]?.name || state.roles[0].name,
